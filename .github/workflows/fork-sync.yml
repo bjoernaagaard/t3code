@@ -1,0 +1,198 @@
+name: Fork sync
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  actions: write
+
+concurrency:
+  group: fork-sync
+  cancel-in-progress: false
+
+jobs:
+  rebase:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    outputs:
+      head: ${{ steps.rebase.outputs.head }}
+      changed: ${{ steps.rebase.outputs.changed }}
+      upstream: ${{ steps.rebase.outputs.upstream }}
+    steps:
+      # GITHUB_TOKEN may not push commits that touch .github/workflows, and
+      # upstream edits its workflows daily, so the push needs a token with the
+      # workflow scope.
+      - uses: actions/checkout@v6
+        with:
+          ref: fork/ci
+          fetch-depth: 0
+          token: ${{ secrets.FORK_SYNC_TOKEN || github.token }}
+
+      # Conflict resolutions are recorded on a laptop and pushed to fork/rerere,
+      # so the same conflict on a later upstream resolves itself here.
+      - name: Restore recorded conflict resolutions
+        run: |
+          if git ls-remote --exit-code origin fork/rerere >/dev/null; then
+            git fetch -q origin fork/rerere
+            mkdir -p .git/rr-cache
+            git archive FETCH_HEAD | tar -x -C .git/rr-cache
+          fi
+
+      - name: Rebase the patch stack onto upstream main
+        id: rebase
+        run: |
+          set -euo pipefail
+          git config user.name "fork-sync"
+          git config user.email "fork-sync@users.noreply.github.com"
+          git config rerere.enabled true
+          git config rerere.autoupdate true
+          git remote add upstream https://github.com/pingdotgg/t3code.git
+          git fetch --no-tags upstream main
+          mapfile -t stack < .github/fork/stack
+          git checkout -q --detach
+          for branch in "${stack[@]}"; do git branch -f "$branch" "origin/$branch"; done
+          top="${stack[-1]}"
+          old_base="$(git merge-base "origin/$top" upstream/main)"
+          git checkout -q "$top"
+          git rebase --update-refs upstream/main || true
+          while test -d .git/rebase-merge; do
+            if git diff --name-only --diff-filter=U | grep -q .; then
+              echo "::error::rerere has no recorded resolution for this conflict"
+              { echo "## Conflict"; git status --short; } | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+            GIT_EDITOR=true git rebase --continue || true
+          done
+          # range-diff marks: '=' unchanged, '!' content changed, '<' dropped (upstream absorbed it or it emptied), '>' new.
+          git range-diff --no-color "$old_base..origin/$top" "upstream/main..$top" > range-diff.txt
+          { echo "## Patch range-diff"; echo '```'; cat range-diff.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          if grep -Eq '^[0-9-]+: +[0-9a-f-]+ [!<>] ' range-diff.txt; then
+            echo "::warning::A patch changed or dropped during rebase. Review the range-diff before trusting the release."
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+          echo "head=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "upstream=$(git rev-parse upstream/main)" >> "$GITHUB_OUTPUT"
+          refspecs=(); for b in "${stack[@]}"; do refspecs+=("$b:refs/heads/candidate/${b#fork/}"); done
+          git push --force origin "${refspecs[@]}"
+
+      - name: Drift from upstream
+        run: |
+          set -euo pipefail
+          {
+            echo "## Drift"
+            echo "| measure | files | lines |"
+            echo "|---|---|---|"
+            echo "| edits to upstream files | $(git diff --diff-filter=MDR --numstat upstream/main HEAD | wc -l) | $(git diff --diff-filter=MDR --numstat upstream/main HEAD | awk '{s+=$1+$2} END{print s+0}') |"
+            echo "| files only the fork has | $(git diff --diff-filter=A --numstat upstream/main HEAD | wc -l) | $(git diff --diff-filter=A --numstat upstream/main HEAD | awk '{s+=$1+$2} END{print s+0}') |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open an issue when a patch changed during rebase
+        if: steps.rebase.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh issue create --title "Fork sync $(date -u +%F) - a patch changed during rebase"
+          --body "Range-diff in ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+      - name: Open an issue when the rebase stops
+        if: failure()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh issue create --title "Fork sync stopped $(date -u +%F)" --body "Run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+  # Upstream's suites run twice on the same runners, once on the stack and once
+  # on the upstream commit under it. The gate fails only when the stack fails a
+  # suite that upstream passes, so upstream flakes on GitHub-hosted runners do
+  # not block a sync.
+  test:
+    needs: rebase
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [stack, upstream]
+        suite: [check, packages, web, server-1, server-2, server-3, server-4]
+    env:
+      GITHUB_REPOSITORY: pingdotgg/t3code
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ matrix.target == 'stack' && needs.rebase.outputs.head || needs.rebase.outputs.upstream }}
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential libsecret-1-dev pkg-config
+      - uses: ./.github/actions/setup-ci-deps
+      - run: vp run --filter @t3tools/desktop ensure:electron
+      - id: suite
+        run: |
+          set -euo pipefail
+          case "${{ matrix.suite }}" in
+            check) vp check && vp run typecheck ;;
+            packages) vp run --parallel --concurrency-limit 4 --filter '!t3' --filter '!@t3tools/monorepo' --filter '!@t3tools/web' test ;;
+            web)
+              node apps/web/node_modules/playwright/cli.js install --with-deps --only-shell chromium
+              vp run --filter @t3tools/web test ;;
+            server-*)
+              node apps/server/node_modules/playwright-core/cli.js install --with-deps --only-shell chromium
+              shard="${{ matrix.suite }}"
+              vp run --filter t3 test --shard "${shard#server-}/4" ;;
+          esac
+      - if: always()
+        run: echo "${{ steps.suite.outcome }}" > outcome.txt
+      - if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: outcome-${{ matrix.target }}-${{ matrix.suite }}
+          path: outcome.txt
+
+  gate:
+    needs: [rebase, test]
+    if: always() && needs.rebase.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v7
+        with:
+          pattern: outcome-*
+      - name: Fail when the stack breaks a suite upstream passes
+        run: |
+          set -euo pipefail
+          status=0
+          {
+            echo "## Upstream suites"
+            echo "| suite | upstream | stack |"
+            echo "|---|---|---|"
+          } >> "$GITHUB_STEP_SUMMARY"
+          for suite in check packages web server-1 server-2 server-3 server-4; do
+            up="$(cat "outcome-upstream-$suite/outcome.txt" 2>/dev/null || echo missing)"
+            st="$(cat "outcome-stack-$suite/outcome.txt" 2>/dev/null || echo missing)"
+            echo "| $suite | $up | $st |" >> "$GITHUB_STEP_SUMMARY"
+            if [[ "$st" != success && "$up" == success ]]; then
+              echo "::error::The stack fails $suite, which passes on upstream"
+              status=1
+            fi
+          done
+          exit "$status"
+
+  promote:
+    needs: [rebase, gate]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.FORK_SYNC_TOKEN || github.token }}
+      - name: Move the stack branches to the tested candidate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mapfile -t stack < <(git show "${{ needs.rebase.outputs.head }}:.github/fork/stack")
+          refspecs=(); for b in "${stack[@]}"; do refspecs+=("refs/remotes/origin/candidate/${b#fork/}:refs/heads/$b"); done
+          git push --force origin "${refspecs[@]}"
+          if git cat-file -e "${{ needs.rebase.outputs.head }}:.github/workflows/fork-release.yml"; then
+            gh workflow run fork-release.yml --ref fork/ci
+          fi
