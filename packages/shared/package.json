@@ -351,6 +351,10 @@
       "types": "./src/httpReadiness.ts",
       "import": "./src/httpReadiness.ts"
     },
+    "./desktopDistribution": {
+      "types": "./src/desktopDistribution.ts",
+      "import": "./src/desktopDistribution.ts"
+    },
     "./devHome": {
       "types": "./src/devHome.ts",
       "import": "./src/devHome.ts"
