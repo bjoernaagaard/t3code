@@ -9,6 +9,7 @@ import {
   type ChatAttachment,
   type ModelSelection,
   type OrchestrationV2ExecutionNode,
+  type OrchestrationV2PlanArtifact,
   type OrchestrationV2ProviderCapabilities,
   type OrchestrationV2ProviderFailure,
   type OrchestrationV2ProviderRef,
@@ -37,6 +38,7 @@ import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
+import * as Struct from "effect/Struct";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
@@ -72,6 +74,7 @@ import {
   resolvePiLaunchArgs,
 } from "./mcpInjection.ts";
 import { PI_FILE_CHANGE_TOOLS } from "./mcpExtensionSource.ts";
+import { piT3Plan, type PiT3Plan } from "./t3Plan.ts";
 
 export const PI_PROVIDER = ProviderDriverKind.make("pi");
 const PI_DRIVER_KIND = PI_PROVIDER;
@@ -562,6 +565,7 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
       let baselineThinking: string | null = null;
       let contextWindow: number | null = null;
       const modelContextWindows = new Map<string, number>();
+      const latestPlans = new Map<string, OrchestrationV2PlanArtifact>();
       let modelsDiscovered = false;
       // Prompt responses carry no id. Keep their session-wide send order and
       // owner so a late ack from a settled turn cannot affect the next turn.
@@ -979,6 +983,56 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
           { discard: true },
         );
 
+      const emitT3Plan = Effect.fnUntraced(function* (
+        turn: ActivePiTurn,
+        toolCallId: string,
+        t3Plan: PiT3Plan,
+        startedAt: DateTime.Utc,
+        emittedAt: DateTime.Utc,
+      ) {
+        const { threadId, runId } = turn.turnInput;
+        const base = baseItemFields(turn, toolCallId, startedAt, emittedAt);
+        const planId = yield* idAllocator.allocate.plan({ threadId, runId, driver: PI_PROVIDER });
+        const plan: OrchestrationV2PlanArtifact = {
+          ...t3Plan,
+          id: planId,
+          threadId,
+          runId,
+          nodeId: base.nodeId,
+          status:
+            t3Plan.kind === "todo_list" && t3Plan.steps.every((step) => step.status === "completed")
+              ? "completed"
+              : "active",
+        };
+        const latestKey = `${threadId}:${plan.kind}`;
+        const previous = latestPlans.get(latestKey);
+        if (previous?.status === "active") {
+          yield* emit({
+            type: "plan.updated",
+            driver: PI_PROVIDER,
+            plan: { ...previous, status: "superseded" },
+          });
+        }
+        latestPlans.set(latestKey, plan);
+        const nodeKind = plan.kind === "todo_list" ? "todo_list" : "plan";
+        yield* emitItemNode(turn, toolCallId, nodeKind, "completed", startedAt, emittedAt);
+        yield* emit({ type: "plan.updated", driver: PI_PROVIDER, plan });
+        yield* emit({
+          type: "turn_item.updated",
+          driver: PI_PROVIDER,
+          turnItem: {
+            ...base,
+            status: "completed",
+            completedAt: emittedAt,
+            title: null,
+            planId,
+            ...(t3Plan.kind === "todo_list"
+              ? { ...Struct.omit(t3Plan, ["kind"]), type: "todo_list" }
+              : { markdown: t3Plan.markdown, type: "proposed_plan", streaming: false }),
+          },
+        });
+      });
+
       const emitToolItem = Effect.fnUntraced(function* (
         turn: ActivePiTurn,
         event: PiRpcRecord,
@@ -1005,6 +1059,10 @@ export const makePiAdapterV2 = Effect.fn("makePiAdapterV2")(function* (
               : "failed"
             : "completed"
           : "running";
+        const t3Plan = completed && !isError ? piT3Plan(resultRecord) : undefined;
+        if (t3Plan !== undefined) {
+          return yield* emitT3Plan(turn, toolCallId, t3Plan, startedAt, emittedAt);
+        }
         const base = baseItemFields(turn, toolCallId, startedAt, emittedAt);
         yield* emitItemNode(
           turn,

@@ -1,4 +1,7 @@
+// @effect-diagnostics nodeBuiltinImport:off - the fixture extension check runs before the Effect program starts.
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NodeFS from "node:fs";
+import * as NodeURL from "node:url";
 import type { ProviderReplayEntry, ProviderReplayTranscript } from "@t3tools/contracts";
 import * as Console from "effect/Console";
 import * as DateTime from "effect/DateTime";
@@ -59,7 +62,10 @@ if (fixture === undefined || variant === undefined) {
 
 const piBinary = process.env.T3_PI_BIN ?? "pi";
 const [modelProvider, ...modelId] = variant.modelSelection.model.split("/");
-const launchArgs = `--provider ${modelProvider} --model ${modelId.join("/")} ${HERMETIC_LAUNCH_ARGS}`;
+// A fixture that needs extension tools ships them as `pi_extension.mjs` beside its transcript.
+const fixtureExtension = new URL("./pi_extension.mjs", variant.transcriptFile);
+const extensionArgs = NodeFS.existsSync(fixtureExtension) ? ` --extension ${PI_REPLAY_ANY}` : "";
+const launchArgs = `--provider ${modelProvider} --model ${modelId.join("/")} ${HERMETIC_LAUNCH_ARGS}${extensionArgs}`;
 const home = process.env.HOME ?? "";
 
 const UUID_PATTERN = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/giu;
@@ -267,7 +273,7 @@ const record = Effect.gen(function* () {
           PiAdapterV2Testkit.layer({
             scenario: fixture.name,
             binaryPath: piBinary,
-            launchArgs,
+            launchArgs: launchArgs.replace(PI_REPLAY_ANY, NodeURL.fileURLToPath(fixtureExtension)),
             environment: [
               { name: "PI_CODING_AGENT_SESSION_DIR", value: sessionDir, sensitive: false },
               { name: "PI_SKIP_VERSION_CHECK", value: "1", sensitive: false },

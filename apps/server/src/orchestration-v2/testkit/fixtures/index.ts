@@ -117,6 +117,7 @@ import { assertOpenCodePlanQuestionsOutput } from "./plan_questions/opencode_out
 import { planQuestionsInput } from "./plan_questions/input.ts";
 import { assertProposedPlanOutput } from "./proposed_plan/codex_output.ts";
 import { assertProposedPlanCursorOutput } from "./proposed_plan/cursor_output.ts";
+import { assertProposedPlanPiOutput } from "./proposed_plan/pi_output.ts";
 import { proposedPlanInput } from "./proposed_plan/input.ts";
 import { assertQueuedCancelledWhileActiveOutput } from "./queued_cancelled_while_active/codex_output.ts";
 import { queuedCancelledWhileActiveInput } from "./queued_cancelled_while_active/input.ts";
@@ -159,6 +160,7 @@ import { threadRollbackToStoppedTurnInput } from "./thread_rollback_to_stopped_t
 import { assertTodoListOutput } from "./todo_list/codex_output.ts";
 import { assertTodoListCursorOutput } from "./todo_list/cursor_output.ts";
 import { assertTodoListGrokOutput } from "./todo_list/grok_output.ts";
+import { assertTodoListPiOutput } from "./todo_list/pi_output.ts";
 import { todoListInput } from "./todo_list/input.ts";
 import { assertToolCallDeniedWriteClaudeOutput } from "./tool_call_denied_write/claude_output.ts";
 import {
@@ -209,6 +211,7 @@ import {
   MUSE_MODEL_SELECTION,
   OPENCODE_MODEL_SELECTION,
   OPENCODE2_MODEL_SELECTION,
+  PI_LOCAL_MODEL_SELECTION,
   PI_MODEL_SELECTION,
   READ_ONLY_NEVER_POLICY,
   READ_ONLY_ON_REQUEST_POLICY,
@@ -1411,6 +1414,12 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         modelSelection: ACP_REGISTRY_MODEL_SELECTION,
         assertOutput: assertTodoListGrokOutput,
       },
+      {
+        driver: ProviderDriverKind.make("pi"),
+        transcriptFile: new URL("./todo_list/pi_transcript.ndjson", import.meta.url),
+        modelSelection: PI_LOCAL_MODEL_SELECTION,
+        assertOutput: assertTodoListPiOutput,
+      },
     ],
   },
   {
@@ -1475,6 +1484,12 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         modelSelection: CURSOR_MODEL_SELECTION,
         runtimePolicyOverride: READ_ONLY_NEVER_POLICY,
         assertOutput: assertProposedPlanCursorOutput,
+      },
+      {
+        driver: ProviderDriverKind.make("pi"),
+        transcriptFile: new URL("./proposed_plan/pi_transcript.ndjson", import.meta.url),
+        modelSelection: PI_LOCAL_MODEL_SELECTION,
+        assertOutput: assertProposedPlanPiOutput,
       },
     ],
   },
