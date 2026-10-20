@@ -381,6 +381,12 @@ export const PI_MODEL_SELECTION = {
   model: "openrouter/deepseek/deepseek-v4-flash",
 } satisfies ModelSelection;
 
+// Recorded through a local OpenAI-compatible endpoint (PI_CODING_AGENT_DIR with a models.json).
+export const PI_LOCAL_MODEL_SELECTION = {
+  instanceId: ProviderInstanceId.make("pi"),
+  model: "cliproxyapi/claude-haiku-5-5",
+} satisfies ModelSelection;
+
 export const ACP_REGISTRY_MODEL_SELECTION = {
   instanceId: ProviderInstanceId.make("acpRegistry"),
   model: "default",
