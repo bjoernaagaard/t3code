@@ -50,7 +50,7 @@ import {
 
 const PI_PRESENTATION = {
   displayName: "Pi",
-  showInteractionModeToggle: false,
+  showInteractionModeToggle: true,
   supportedRuntimeModes: ["approval-required", "auto-accept-edits", "full-access"],
   reportsContextWindow: true,
   requiresNewThreadForModelChange: false,
